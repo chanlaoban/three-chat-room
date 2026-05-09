@@ -793,12 +793,8 @@ body {
 </div>
 
 <script>
-// 持久化 sessionId（刷新不丢失）
-let sessionId = localStorage.getItem('chat_session_id');
-if (!sessionId) {
-    sessionId = 'web_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-    localStorage.setItem('chat_session_id', sessionId);
-}
+// 固定 sessionId — 内外网访问同一份聊天记录
+const sessionId = 'web_default';
 let isSending = false;
 
 // 页面加载时恢复历史消息
