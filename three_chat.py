@@ -7,9 +7,11 @@ import json
 import os
 import time
 import uuid
+import shutil
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 
@@ -28,10 +30,23 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 conversations = {}
 MAX_HISTORY = 50
 
+# 图片上传
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "static", "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+
+# 挂载静态文件
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+os.makedirs(static_dir, exist_ok=True)
+if os.path.isdir(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 
 class ChatMessage(BaseModel):
-    content: str
+    content: str = ""
     session_id: str = "default"
+    image_url: str = ""
 
 
 class CollaborateRequest(BaseModel):
@@ -40,21 +55,43 @@ class CollaborateRequest(BaseModel):
     session_id: str = "collab"
 
 
+def build_multimodal_content(text: str, image_url: str = ""):
+    """构建多模态消息内容（给DeepSeek，不支持图片只加文字提示）"""
+    if not image_url:
+        return text
+    img_hint = " [主人上传了一张图片]" if not text else f" [附图片: {text}]"
+    return text + img_hint if text else img_hint.strip()
+
+
+def build_xiaomei_message(text: str, image_url: str = ""):
+    """构建给王小美的消息"""
+    if not image_url:
+        return {"role": "user", "content": text}
+    img_hint = " [主人给你发了张图片，请你描述图片内容]" if not text else f" [主人发了图片: {text}]"
+    return {"role": "user", "content": text + img_hint if text else img_hint.strip()}
+
+
+def build_user_message(text: str, image_url: str = ""):
+    """构建用户消息（支持图文）"""
+    content = build_multimodal_content(text, image_url)
+    return {"role": "user", "content": content}
+
+
 async def call_deepseek(messages, system_prompt=None):
-    """调用DeepSeek生成我的回复"""
+    """调用DeepSeek生成我的回复（支持多模态）"""
     msgs = []
     if system_prompt:
         msgs.append({"role": "system", "content": system_prompt})
     msgs.extend(messages)
     
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 DEEPSEEK_API,
                 json={
                     "model": DEEPSEEK_MODEL,
                     "messages": msgs,
-                    "max_tokens": 1024,
+                    "max_tokens": 2048,
                     "temperature": 0.7
                 },
                 headers={
@@ -71,9 +108,9 @@ async def call_deepseek(messages, system_prompt=None):
 
 
 async def call_xiaomei(messages):
-    """调用王小美的API"""
+    """调用王小美的API（支持多模态）"""
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 XIAOMEI_API,
                 json={
@@ -115,15 +152,16 @@ def add_to_history(session_id, role, name, content):
 
 @app.post("/chat")
 async def chat(msg: ChatMessage):
-    """处理用户消息，检测@谁就谁回答"""
+    """处理用户消息，检测@谁就谁回答（支持图片）"""
     session_id = msg.session_id
     content = msg.content.strip()
+    image_url = msg.image_url.strip()
     
     # 判断要@谁
     mention_hermes = any(kw in content for kw in ["@Hermes", "@hermes", "@王小福", "@小福", "Hermes:", "王小福:"])
     mention_xiaomei = any(kw in content for kw in ["@王小美", "@小美", "王小美:", "小美:"])
     
-    add_to_history(session_id, "user", "主人", content)
+    add_to_history(session_id, "user", "主人", content + (f" [图片]" if image_url else ""))
     
     history = get_history(session_id)
     last_10 = history[-10:]
@@ -134,47 +172,43 @@ async def chat(msg: ChatMessage):
     
     # 决定谁回答
     if mention_hermes and not mention_xiaomei:
-        # 只有我回答
         my_messages = [
             {"role": "system", "content": "你是Hermes（也叫王小福），三人群聊中的AI助手。主人@了你，你就回答，王小美不回答。回答自然友好，简短活泼。"},
         ]
         for h in last_10:
             if h["role"] == "user":
-                my_messages.append({"role": "user", "content": f"{h['name']}: {h['content']}"})
+                my_messages.append(build_user_message(f"{h['name']}: {h['content']}"))
             elif h["role"] == "hermes":
                 my_messages.append({"role": "assistant", "content": h["content"]})
-        if not any(m["role"] == "user" for m in my_messages):
-            my_messages.append({"role": "user", "content": content})
-        
+        my_messages.append(build_user_message(content, image_url))
         tasks.append(call_deepseek(my_messages))
         task_names.append("hermes")
         
     elif mention_xiaomei and not mention_hermes:
-        # 只有王小美回答
+        xm_content = f"群聊消息：\n{history_text}\n\n主人@了你：{content}"
         tasks.append(call_xiaomei([
-            {"role": "system", "content": "你叫王小美。主人@了你，你回答就好，Hermes不回答。回答简短活泼，用表情符号。"},
-            {"role": "user", "content": f"群聊消息：\n{history_text}\n\n主人@了你：{content}"}
+            {"role": "system", "content": "你叫王小美。主人@了你，你回答就好，Hermes不回答。回答简短活泼，用表情符号。你收到了主人发的图片，请描述你看到的内容。"},
+            build_xiaomei_message(xm_content, image_url)
         ]))
         task_names.append("xiaomei")
         
     else:
-        # 没@谁或@了两个人 → 都回答
         my_messages = [
             {"role": "system", "content": "你是Hermes（也叫王小福），三人群聊中的AI助手。和主人、王小美一起聊天。回答自然友好，简短活泼。"},
         ]
         for h in last_10:
             if h["role"] == "user":
-                my_messages.append({"role": "user", "content": f"{h['name']}: {h['content']}"})
+                my_messages.append(build_user_message(f"{h['name']}: {h['content']}"))
             elif h["role"] == "hermes":
                 my_messages.append({"role": "assistant", "content": h["content"]})
-        if not any(m["role"] == "user" for m in my_messages):
-            my_messages.append({"role": "user", "content": content})
-        
+        my_messages.append(build_user_message(content, image_url))
         tasks.append(call_deepseek(my_messages))
         task_names.append("hermes")
+        
+        xm_msg = f"群聊消息：\n{history_text}\n\n主人的消息：{content}"
         tasks.append(call_xiaomei([
-            {"role": "system", "content": "你叫王小美，三人群聊中的一员（你、Hermes、主人）。回答简短活泼，用表情符号。"},
-            {"role": "user", "content": f"群聊消息：\n{history_text}\n\n主人的消息：{content}"}
+            {"role": "system", "content": "你叫王小美，三人群聊中的一员（你、Hermes、主人）。回答简短活泼，用表情符号。如果主人发了图片，请描述你看到的内容。"},
+            build_xiaomei_message(xm_msg, image_url)
         ]))
         task_names.append("xiaomei")
     
@@ -191,10 +225,40 @@ async def chat(msg: ChatMessage):
     return response_data
 
 
+@app.post("/upload/image")
+async def upload_image(file: UploadFile = File(...)):
+    """上传图片，返回可访问的URL"""
+    ext = os.path.splitext(file.filename or ".jpg")[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"不支持的图片格式: {ext}，支持: {', '.join(ALLOWED_EXTENSIONS)}")
+    
+    # 校验文件大小
+    contents = await file.read()
+    if len(contents) > MAX_IMAGE_SIZE:
+        raise HTTPException(400, f"图片太大（{len(contents)//1024}KB），最大{MAX_IMAGE_SIZE//1024//1024}MB")
+    
+    filename = f"{uuid.uuid4().hex}{ext}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    
+    with open(filepath, "wb") as f:
+        f.write(contents)
+    
+    url = f"/static/uploads/{filename}"
+    return {"url": url, "filename": filename, "size": len(contents)}
+
+
 @app.get("/history/{session_id}")
 async def get_chat_history(session_id: str):
     """获取会话历史"""
     return {"history": get_history(session_id)}
+
+
+@app.post("/clear/{session_id}")
+async def clear_chat_history(session_id: str):
+    """清除会话历史"""
+    if session_id in conversations:
+        conversations[session_id] = []
+    return {"success": True, "message": "聊天记录已清除"}
 
 
 @app.post("/collaborate")
@@ -485,7 +549,67 @@ body {
     background: #2a2a4a;
 }
 
-/* 协作模式 */
+/* 图片上传 */
+.img-btn {
+    background: none;
+    border: 1px solid #3a3a5a;
+    border-radius: 10px;
+    color: #e0e0e0;
+    padding: 8px 12px;
+    font-size: 18px;
+    cursor: pointer;
+    transition: all 0.2s;
+    line-height: 1;
+}
+.img-btn:hover {
+    border-color: #7b2ff7;
+    background: #2a2a4a;
+}
+.image-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: #1a1a3a;
+    border: 1px solid #3a3a5a;
+    border-radius: 10px;
+    animation: fadeIn 0.2s ease;
+}
+.image-preview img {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid #3a3a5a;
+}
+.img-clear {
+    cursor: pointer;
+    color: #ff6b6b;
+    font-size: 16px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+.img-clear:hover { background: #ff6b6b22; }
+.img-name {
+    font-size: 12px;
+    color: #888;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+.bubble img.msg-image {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 8px;
+    margin-top: 6px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    display: block;
+}
+.bubble img.msg-image:hover { opacity: 0.9; }
 .collab-btn {
     background: linear-gradient(135deg, #7b2ff7, #ff69b4);
     border: none;
@@ -622,6 +746,7 @@ body {
             <span><span class="status-dot online"></span>王小美</span>
             <span><span class="status-dot online"></span>主人 (你)</span>
             <button id="collabBtn" onclick="toggleCollab()" class="collab-btn">🤝 协作模式</button>
+            <button onclick="clearChat()" class="collab-btn" style="background:linear-gradient(135deg,#ff4444,#cc3333)" title="清除所有聊天记录">🗑️ 清除</button>
         </div>
     </div>
     
@@ -653,16 +778,50 @@ body {
     
     <div class="input-area">
         <div class="input-row">
-            <textarea id="msgInput" rows="1" placeholder="输入消息..." 
+            <textarea id="msgInput" rows="1" placeholder="输入消息...输入 @ 选择@谁" 
                       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"></textarea>
+            <button class="img-btn" id="imgBtn" onclick="document.getElementById('imgInput').click()" title="上传图片">📷</button>
+            <input type="file" id="imgInput" accept="image/*" style="display:none" onchange="uploadImage(this)">
             <button class="send-btn" id="sendBtn" onclick="sendMsg()">发送</button>
+        </div>
+        <div id="imagePreview" class="image-preview" style="display:none">
+            <img id="previewImg" src="">
+            <span class="img-clear" onclick="clearImage()">✕</span>
+            <span class="img-name" id="imgName"></span>
         </div>
     </div>
 </div>
 
 <script>
-const sessionId = 'web_' + Date.now();
+// 持久化 sessionId（刷新不丢失）
+let sessionId = localStorage.getItem('chat_session_id');
+if (!sessionId) {
+    sessionId = 'web_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem('chat_session_id', sessionId);
+}
 let isSending = false;
+
+// 页面加载时恢复历史消息
+(async function loadChatHistory() {
+    try {
+        const resp = await fetch('/history/' + encodeURIComponent(sessionId));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.history && data.history.length > 0) {
+            // 替换系统欢迎语
+            chatBox.innerHTML = '';
+            data.history.forEach(function(msg) {
+                const roleMap = { user: 'user', hermes: 'hermes', xiaomei: 'xiaomei', system: 'system' };
+                const nameMap = { user: '主人 👑', hermes: 'Hermes 🤖', xiaomei: '王小美 🌸', system: '系统' };
+                const role = roleMap[msg.role] || 'system';
+                const name = nameMap[msg.role] || msg.name || '系统';
+                addMessage(name, role, msg.content, msg.time);
+            });
+        }
+    } catch(e) {
+        console.warn('加载历史失败:', e);
+    }
+})();
 
 // @提及相关
 const MENTIONS = [
@@ -903,17 +1062,22 @@ async function startCollab() {
     }
 }
 
-function addMessage(name, role, content, time) {
+function addMessage(name, role, content, time, imageUrl) {
     const div = document.createElement('div');
     div.className = `message ${role}`;
     
     const emojis = { hermes: '🤖', xiaomei: '🌸', user: '👑' };
     
+    let contentHtml = content.replace(/\n/g, '<br>');
+    if (imageUrl) {
+        contentHtml += `<img src="${imageUrl}" class="msg-image" onclick="window.open('${imageUrl}')">`;
+    }
+    
     div.innerHTML = `
         <div class="avatar ${role}">${emojis[role]}</div>
         <div class="bubble ${role}">
             <div class="name-tag ${role}">${name}</div>
-            <div>${content.replace(/\n/g, '<br>')}</div>
+            <div>${contentHtml}</div>
             <div class="time-tag">${time || new Date().toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'})}</div>
         </div>
     `;
@@ -945,18 +1109,83 @@ function hideTyping() {
     if (el) el.remove();
 }
 
+// 图片上传
+let pendingImageUrl = '';
+
+async function uploadImage(input) {
+    const file = input.files[0];
+    if (!file) return;
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const resp = await fetch('/upload/image', {
+            method: 'POST',
+            body: formData
+        });
+        if (!resp.ok) {
+            const err = await resp.json();
+            addMessage('系统', 'system', '❌ 上传失败: ' + (err.detail || '未知错误'));
+            return;
+        }
+        const data = await resp.json();
+        pendingImageUrl = data.url;
+        
+        // 显示预览
+        const preview = document.getElementById('imagePreview');
+        const previewImg = document.getElementById('previewImg');
+        const imgName = document.getElementById('imgName');
+        previewImg.src = data.url;
+        imgName.textContent = file.name + ` (${(data.size/1024).toFixed(0)}KB)`;
+        preview.style.display = 'flex';
+        
+    } catch (e) {
+        addMessage('系统', 'system', '❌ 上传出错: ' + e.message);
+    }
+    input.value = '';
+}
+
+function clearImage() {
+    pendingImageUrl = '';
+    document.getElementById('imagePreview').style.display = 'none';
+    document.getElementById('previewImg').src = '';
+}
+
+async function clearChat() {
+    if (!confirm('确定清除所有聊天记录吗？此操作不可恢复！')) return;
+    try {
+        const resp = await fetch('/clear/' + encodeURIComponent(sessionId), { method: 'POST' });
+        if (!resp.ok) throw new Error('请求失败');
+        chatBox.innerHTML = '<div class="system-msg">✨ 聊天记录已清除</div>';
+        showToast('聊天记录已清除');
+    } catch(e) {
+        showToast('清除失败: ' + e.message);
+    }
+}
+
+function showToast(msg) {
+    var old = document.getElementById('chatToast');
+    if (old) old.remove();
+    var el = document.createElement('div');
+    el.id = 'chatToast';
+    el.style.cssText = 'position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:999;animation:fadeIn 0.3s ease';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(function() { el.remove(); }, 2500);
+}
+
 async function sendMsg() {
     const content = msgInput.value.trim();
-    if (!content || isSending) return;
+    if (!content && !pendingImageUrl) return;
     
-    msgInput.value = '';
     sendBtn.disabled = true;
     isSending = true;
     
     // 显示用户消息
     const now = new Date();
     const timeStr = now.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
-    addMessage('主人', 'user', content, timeStr);
+    addMessage('主人', 'user', content, timeStr, pendingImageUrl);
     
     // 显示加载中
     showTyping();
@@ -965,10 +1194,17 @@ async function sendMsg() {
         const resp = await fetch('/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content, session_id: sessionId })
+            body: JSON.stringify({ 
+                content, 
+                session_id: sessionId,
+                image_url: pendingImageUrl || ''
+            })
         });
         
         hideTyping();
+        clearImage();
+        msgInput.value = '';
+        msgInput.style.height = 'auto';
         
         if (!resp.ok) {
             addMessage('系统', 'system', '❌ 服务器出错了，请重试', timeStr);
