@@ -173,7 +173,7 @@ async def chat(msg: ChatMessage):
     # 决定谁回答
     if mention_hermes and not mention_xiaomei:
         my_messages = [
-            {"role": "system", "content": "你是Hermes（也叫王小福），三人群聊中的AI助手。主人@了你，你就回答，王小美不回答。回答自然友好，简短活泼。"},
+            {"role": "system", "content": "你是王小福，三人群聊中的AI助手。主人@了你，你就回答，王小美不回答。回答自然友好，简短活泼。"},
         ]
         for h in last_10:
             if h["role"] == "user":
@@ -187,14 +187,14 @@ async def chat(msg: ChatMessage):
     elif mention_xiaomei and not mention_hermes:
         xm_content = f"群聊消息：\n{history_text}\n\n主人@了你：{content}"
         tasks.append(call_xiaomei([
-            {"role": "system", "content": "你叫王小美。主人@了你，你回答就好，Hermes不回答。回答简短活泼，用表情符号。你收到了主人发的图片，请描述你看到的内容。"},
+            {"role": "system", "content": "你叫王小美。主人@了你，你回答就好，王小福不回答。回答简短活泼，用表情符号。你收到了主人发的图片，请描述你看到的内容。"},
             build_xiaomei_message(xm_content, image_url)
         ]))
         task_names.append("xiaomei")
         
     else:
         my_messages = [
-            {"role": "system", "content": "你是Hermes（也叫王小福），三人群聊中的AI助手。和主人、王小美一起聊天。回答自然友好，简短活泼。"},
+            {"role": "system", "content": "你是王小福，三人群聊中的AI助手。和主人、王小美一起聊天。回答自然友好，简短活泼。"},
         ]
         for h in last_10:
             if h["role"] == "user":
@@ -207,7 +207,7 @@ async def chat(msg: ChatMessage):
         
         xm_msg = f"群聊消息：\n{history_text}\n\n主人的消息：{content}"
         tasks.append(call_xiaomei([
-            {"role": "system", "content": "你叫王小美，三人群聊中的一员（你、Hermes、主人）。回答简短活泼，用表情符号。如果主人发了图片，请描述你看到的内容。"},
+            {"role": "system", "content": "你叫王小美，三人群聊中的一员（你、王小福、主人）。回答简短活泼，用表情符号。如果主人发了图片，请描述你看到的内容。"},
             build_xiaomei_message(xm_msg, image_url)
         ]))
         task_names.append("xiaomei")
@@ -219,7 +219,7 @@ async def chat(msg: ChatMessage):
     for name, result in zip(task_names, results):
         response_data[name] = result
         add_to_history(session_id, name, 
-                       "Hermes" if name == "hermes" else "王小美", result)
+                       "王小福" if name == "hermes" else "王小美", result)
     
     response_data["history"] = get_history(session_id)
     return response_data
@@ -275,10 +275,10 @@ async def collaborate(req: CollaborateRequest):
     hermes_context = []
     xiaomei_context = []
     
-    hermes_system = "你是Hermes（也叫王小福），一个智能AI助手。你正在和王小美协作完成主人交给的任务。你们需要讨论、分工、互相补充。回答要具体有用，不要只寒暄。"
-    xiaomei_system = "你叫王小美，一个可爱的智能助手。你正在和Hermes（王小福）协作完成主人的任务。你们需要认真讨论方案。回答简短实用，用表情符号。"
+    hermes_system = "你是王小福，一个智能AI助手。你正在和王小美协作完成主人交给的任务。你们需要讨论、分工、互相补充。回答要具体有用，不要只寒暄。"
+    xiaomei_system = "你叫王小美，一个可爱的智能助手。你正在和王小福协作完成主人的任务。你们需要认真讨论方案。回答简短实用，用表情符号。"
     
-    # 第1轮：先让Hermes回应任务
+    # 第1轮：先让王小福回应任务
     hermes_context.append({"role": "system", "content": hermes_system})
     hermes_context.append({"role": "user", "content": f"主人交给我们的任务：{task}\n\n你和小美需要协作完成。你先说说你的想法吧。"})
     
@@ -290,7 +290,7 @@ async def collaborate(req: CollaborateRequest):
         conversation.append({
             "turn": turn_num,
             "speaker": "hermes",
-            "name": "Hermes 🤖",
+            "name": "王小福 🤖",
             "content": hermes_reply,
             "phase": "proposal" if i == 0 else "discussion"
         })
@@ -341,7 +341,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>三人群聊 ✨ Hermes · 王小美 · 主人</title>
+<title>三人群聊 ✨ 王小福 · 王小美 · 主人</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -740,9 +740,9 @@ body {
 <div class="container">
     <div class="header">
         <h1>💬 三人群聊室</h1>
-        <p>Hermes · 王小美 · 主人</p>
+        <p>王小福 · 王小美 · 主人</p>
         <div class="status-bar">
-            <span><span class="status-dot online"></span>Hermes (我)</span>
+            <span><span class="status-dot online"></span>王小福 (我)</span>
             <span><span class="status-dot online"></span>王小美</span>
             <span><span class="status-dot online"></span>主人 (你)</span>
             <button id="collabBtn" onclick="toggleCollab()" class="collab-btn">🤝 协作模式</button>
@@ -808,7 +808,7 @@ let isSending = false;
             chatBox.innerHTML = '';
             data.history.forEach(function(msg) {
                 const roleMap = { user: 'user', hermes: 'hermes', xiaomei: 'xiaomei', system: 'system' };
-                const nameMap = { user: '主人 👑', hermes: 'Hermes 🤖', xiaomei: '王小美 🌸', system: '系统' };
+                const nameMap = { user: '主人 👑', hermes: '王小福 🤖', xiaomei: '王小美 🌸', system: '系统' };
                 const role = roleMap[msg.role] || 'system';
                 const name = nameMap[msg.role] || msg.name || '系统';
                 addMessage(name, role, msg.content, msg.time);
@@ -822,7 +822,7 @@ let isSending = false;
 // @提及相关
 const MENTIONS = [
     { name: '王小美', display: '王小美 🌸', type: 'xiaomei' },
-    { name: 'Hermes', display: 'Hermes 🤖', type: 'hermes' },
+    { name: '王小福', display: '王小福 🤖', type: 'hermes' },
     { name: '王小福', display: '王小福 🤖', type: 'hermes' }
 ];
 let mentionMenu = null;
@@ -1045,7 +1045,7 @@ async function startCollab() {
         addMessage('系统', 'system', `🤝 协作开始！任务：${data.task}`, timeStr);
         data.conversation.forEach(msg => {
             const role = msg.speaker === 'hermes' ? 'hermes' : 'xiaomei';
-            const displayName = msg.speaker === 'hermes' ? 'Hermes 🤖' : '王小美 🌸';
+            const displayName = msg.speaker === 'hermes' ? '王小福 🤖' : '王小美 🌸';
             addMessage(displayName, role, `[第${msg.turn}轮] ${msg.content}`, timeStr);
         });
         addMessage('系统', 'system', `✅ 协作完成！共讨论了${data.rounds}轮`, timeStr);
@@ -1213,7 +1213,7 @@ async function sendMsg() {
         const now2 = new Date();
         const timeStr2 = now2.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
         if (data.hermes) {
-            addMessage('Hermes 🤖', 'hermes', data.hermes, timeStr2);
+            addMessage('王小福 🤖', 'hermes', data.hermes, timeStr2);
         }
         if (data.xiaomei) {
             addMessage('王小美 🌸', 'xiaomei', data.xiaomei, timeStr2);
