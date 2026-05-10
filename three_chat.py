@@ -823,7 +823,6 @@ let isSending = false;
 const MENTIONS = [
     { name: '王小美', display: '王小美 🌸', type: 'xiaomei' },
     { name: '王小福', display: '王小福 🤖', type: 'hermes' },
-    { name: '王小福', display: '王小福 🤖', type: 'hermes' }
 ];
 let mentionMenu = null;
 let mentionFilter = '';
